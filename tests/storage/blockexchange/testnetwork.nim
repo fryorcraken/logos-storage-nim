@@ -7,6 +7,7 @@ import pkg/storage/chunker
 import pkg/storage/blocktype as bt
 import pkg/storage/blockexchange
 import pkg/storage/blockexchange/protocol/wantblocks
+import pkg/storage/downloadtransport
 
 import ../../asynctest
 import ../examples
@@ -186,6 +187,35 @@ asyncchecksuite "Network - MixTransport peer events":
 
   teardown:
     await allFuturesThrowing(switch1.stop(), switch2.stop())
+
+  test "Direct and Mix peer entries and departures are independent":
+    let
+      network = BlockExcNetwork.new(switch1)
+      mixNetwork = network.networkFor(DownloadTransport.Mix)
+      peer = switch2.peerInfo.peerId
+    await network.handlePeerJoined(peer)
+    await mixNetwork.handlePeerJoined(peer)
+    check network.peers[peer] != mixNetwork.peers[peer]
+    await mixNetwork.handlePeerDeparted(peer)
+    check peer in network.peers
+    check peer notin mixNetwork.peers
+    await network.stop()
+
+  test "Unavailable Mix does not call the direct connection provider":
+    var directCalls = 0
+    proc directConnection(): Future[Connection] {.async: (raises: [CancelledError]).} =
+      inc directCalls
+      return nil
+
+    let
+      network = BlockExcNetwork.new(switch1, connProvider = directConnection)
+      mixNetwork = network.networkFor(DownloadTransport.Mix)
+      peer = switch2.peerInfo.peerId
+    await mixNetwork.handlePeerJoined(peer)
+    let conn = await mixNetwork.peers[peer].connect()
+    check conn.isNil
+    check directCalls == 0
+    await network.stop()
 
   test "Physical Mix relay connections do not become BlockExchange peers":
     let network = BlockExcNetwork.new(switch1, useMixSessionEvents = true)

@@ -483,7 +483,7 @@ proc new*(
       isServer = config.nat.hasExtIp or config.autonatServer,
     )
 
-    network = BlockExcNetwork.new(switch, useMixSessionEvents = config.mixEnabled)
+    network = BlockExcNetwork.new(switch)
 
     repoData =
       case config.repoKind

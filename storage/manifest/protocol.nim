@@ -128,19 +128,27 @@ proc handleManifestRequest(
     warn "Error handling manifest request", exc = exc.msg
 
 proc fetchManifestFromPeer(
-    self: ManifestProtocol, peer: PeerRecord, cid: Cid
+    self: ManifestProtocol, peer: PeerRecord, cid: Cid, transport: DownloadTransport
 ): Future[?!bt.Block] {.async: (raises: [CancelledError]).} =
   var conn: Connection
   try:
-    if not self.mixTransport.isNil:
-      conn = (await self.mixTransport.dial(peer.peerId, ManifestProtocolCodec)).valueOr:
+    if transport == DownloadTransport.Mix:
+      if self.mixTransport.isNil:
+        return failure("Mix transport is not enabled")
+      let addresses = mixAddresses(peer.peerId, peer.addresses.mapIt(it.address))
+      if addresses.len == 0:
+        return failure("Provider has no usable Mix address")
+      conn = (
+        await self.mixTransport.dial(peer.peerId, addresses, ManifestProtocolCodec)
+      ).valueOr:
         return failure(
           "Error opening MixTransport manifest stream to " & $peer.peerId & ": " & error
         )
     else:
-      conn = await self.switch.dial(
-        peer.peerId, peer.addresses.mapIt(it.address), ManifestProtocolCodec
-      )
+      let addresses = directAddresses(peer.addresses.mapIt(it.address))
+      if addresses.len == 0:
+        return failure("Provider has no direct address")
+      conn = await self.switch.dial(peer.peerId, addresses, ManifestProtocolCodec)
 
     let cidBytes = cid.data.buffer
     var reqBuf = newSeqUninit[byte](2 + cidBytes.len)
@@ -171,8 +179,12 @@ proc fetchManifestFromPeer(
       await conn.close()
 
 proc fetchManifest*(
-    self: ManifestProtocol, cid: Cid
+    self: ManifestProtocol,
+    cid: Cid,
+    transport: DownloadTransport = DownloadTransport.Direct,
 ): Future[?!Manifest] {.async: (raises: [CancelledError]).} =
+  if transport == DownloadTransport.Mix and self.mixTransport.isNil:
+    return failure("Mix transport is not enabled")
   if err =? cid.isManifest.errorOption:
     return failure "CID has invalid content type for manifest {$cid}"
 
@@ -192,7 +204,7 @@ proc fetchManifest*(
 
       if providers.len > 0:
         for provider in providers:
-          let fetchFut = self.fetchManifestFromPeer(provider, cid)
+          let fetchFut = self.fetchManifestFromPeer(provider, cid, transport)
 
           var blkResult: ?!bt.Block
           if (await fetchFut.withTimeout(self.fetchTimeout)):
