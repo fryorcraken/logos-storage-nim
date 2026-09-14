@@ -55,17 +55,10 @@ type
 proc connected*(self: NetworkPeer): bool =
   not (isNil(self.sendConn)) and not (self.sendConn.closed or self.sendConn.atEof)
 
-proc readLoop*(
-    self: NetworkPeer, conn: Connection, useForSending: bool = false
-) {.async: (raises: []).} =
+proc readLoop*(self: NetworkPeer, conn: Connection) {.async: (raises: []).} =
   if isNil(conn):
     trace "No connection to read from", peer = self.id
     return
-
-  # An incoming Mix stream is bidirectional. The recipient cannot create a
-  # new destination connection from the anonymous session identity.
-  if useForSending and not self.connected:
-    self.sendConn = conn
 
   trace "Attaching read loop", peer = self.id, connId = conn.oid
   try:

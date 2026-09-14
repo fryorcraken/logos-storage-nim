@@ -87,7 +87,6 @@ type
     mixTransport*: MixTransport
     mixNetwork*: BlockExcNetwork
     mixSessions: Table[PeerId, TransportSession]
-    recipientPeers: HashSet[PeerId]
     useMixSessionEvents: bool
     switchPeerEventHandler: lp_connmanager.PeerEventHandler
     mixSessionEventHandler: SessionEventHandler
@@ -217,10 +216,6 @@ proc getOrCreatePeer(self: BlockExcNetwork, peer: PeerId): NetworkPeer =
   .} =
     if self.useMixSessionEvents and self.mixTransport.isNil:
       return nil
-    if peer in self.recipientPeers:
-      # Replies use the existing inbound stream; a session pseudonym is not
-      # a provider identity that can be dialed through the relay pool.
-      return nil
     if not self.mixTransport.isNil:
       trace "Opening block exchange stream via MixTransport", peer
       let stream = (await self.mixTransport.dial(peer, Codec)).valueOr:
@@ -311,9 +306,8 @@ proc dropPeer*(
       await self.mixTransport.resetSession(session)
       return
 
-    # A recipient-side Mix session is identified to BlockExchange by its
-    # anonymous session identifier. MixTransport does not currently expose a
-    # public lookup from that identifier to the owning TransportSession.
+    # This adapter retains session objects obtained through provider dialing,
+    # but not recipient sessions introduced by session events.
     warn "Removing MixTransport peer without resetting its recipient session", peer
     await self.unregisterPeer(peer)
     return
@@ -340,7 +334,6 @@ proc unregisterPeer(
 ) {.async: (raises: [CancelledError]).} =
   trace "Cleaning up departed peer", peer
   self.mixSessions.del(peer)
-  self.recipientPeers.excl(peer)
   self.peers.del(peer)
   if not self.handlers.onPeerDeparted.isNil:
     await self.handlers.onPeerDeparted(peer)
@@ -375,8 +368,6 @@ proc attachMixTransport*(self: BlockExcNetwork, mixTransport: MixTransport) =
   ): Future[void] {.async: (raises: [CancelledError]).} =
     case event.kind
     of SessionEventKind.Established:
-      if event.role == SessionRole.Recipient:
-        self.recipientPeers.incl(event.peerId)
       await self.registerPeer(event.peerId)
     of SessionEventKind.Closed:
       await self.unregisterPeer(event.peerId)
@@ -392,7 +383,6 @@ proc detachMixTransport*(self: BlockExcNetwork) =
     self.mixTransport.removeSessionEventHandler(self.mixSessionEventHandler)
   self.mixSessionEventHandler = nil
   self.mixSessions.clear()
-  self.recipientPeers.clear()
   self.mixTransport = nil
 
 method init*(self: BlockExcNetwork) {.raises: [].} =
@@ -420,10 +410,10 @@ method init*(self: BlockExcNetwork) {.raises: [].} =
     let peerId = conn.peerId
     if conn of TransportStream and not self.mixNetwork.isNil:
       let peer = self.mixNetwork.getOrCreatePeer(peerId)
-      await peer.readLoop(conn, useForSending = true)
+      await peer.readLoop(conn)
       return
     let blockexcPeer = self.getOrCreatePeer(peerId)
-    await blockexcPeer.readLoop(conn, useForSending = conn of TransportStream)
+    await blockexcPeer.readLoop(conn)
 
   self.handler = handler
 

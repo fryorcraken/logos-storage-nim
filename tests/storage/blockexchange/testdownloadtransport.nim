@@ -16,6 +16,47 @@ import pkg/storage/blocktype as bt
 import ../../asynctest
 import ../helpers
 
+proc verifyRecipientPresenceLifecycle(
+    requester, provider: BlockExcNetwork, providerId: PeerId, address: BlockAddress
+) {.async.} =
+  let
+    requestStream = TransportStream(await requester.peers[providerId].connect())
+    anonymousPeerId = requestStream.sessionId
+    replyPeer = provider.peers[anonymousPeerId]
+    presence = @[BlockPresence(address: address, kind: BlockPresenceType.HaveRange)]
+    previousHandler = requester.handlers.onPresence
+  var received = newFuture[seq[BlockPresence]]("recipient presence")
+  requester.handlers.onPresence = proc(
+      peer: PeerId, values: seq[BlockPresence]
+  ) {.async: (raises: []).} =
+    doAssert peer == providerId
+    if not received.finished:
+      received.complete(values)
+  defer:
+    requester.handlers.onPresence = previousHandler
+
+  proc exchangePresence(): Future[TransportStream] {.async.} =
+    received = newFuture[seq[BlockPresence]]("recipient presence")
+    await provider.sendBlockPresence(anonymousPeerId, presence)
+    let values = await received.wait(15.seconds)
+    doAssert values.len == 1 and values[0].address == address
+    return TransportStream(await replyPeer.connect())
+
+  # Presence uses a recipient-opened stream, not the incoming request stream.
+  let firstReplyStream = await exchangePresence()
+  doAssert firstReplyStream.streamId mod 2 == 0
+  doAssert firstReplyStream.sessionId == requestStream.sessionId
+
+  # Subsequent presence messages reuse that sending connection.
+  let reusedReplyStream = await exchangePresence()
+  doAssert reusedReplyStream == firstReplyStream
+
+  # Closing only the sending stream must not require a replacement session.
+  await firstReplyStream.close()
+  let replacementReplyStream = await exchangePresence()
+  doAssert replacementReplyStream.streamId != firstReplyStream.streamId
+  doAssert replacementReplyStream.sessionId == firstReplyStream.sessionId
+
 asyncchecksuite "Download transport selection":
   test "Transport parameter accepts only direct and mix":
     check parseDownloadTransport("direct").tryGet() == DownloadTransport.Direct
@@ -184,6 +225,12 @@ asyncchecksuite "Download transport selection":
       check (await mixNetwork.peers[peer].connect()) of TransportStream
       check engines[0].peersFor(DownloadTransport.Direct).get(peer) !=
         engines[0].peersFor(DownloadTransport.Mix).get(peer)
+      await verifyRecipientPresenceLifecycle(
+        mixNetwork,
+        engines[1].network.networkFor(DownloadTransport.Mix),
+        peer,
+        BlockAddress(treeCid: dataset.manifest.treeCid, index: 0),
+      )
     finally:
       for transport in transports:
         await transport.stop()

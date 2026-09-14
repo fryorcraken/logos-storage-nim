@@ -62,21 +62,34 @@ Mix session events populate the Mix adapter. Switch events populate the direct a
 
 ## Sending replies from the anonymous recipient
 
-BlockExchange normally uses an outgoing connection for presence messages. On the Mix recipient, however, the remote peer ID is a session pseudonym, not a destination that can be contacted by starting a new Mix connection. The original reference integration attempted that dial and could receive a request without being able to return its presence response.
+The recipient-dial integration is verified by the real-network download-selection test. After completing manifest and block transfers, the test delivers presence on a recipient-opened stream, reuses that stream, closes it, and delivers presence on a replacement with the same session ID. Storage's compile-only check also passes.
 
-The mounted handler now marks an incoming Mix stream as usable for outgoing messages when it starts the peer's read loop:
+BlockExchange uses a retained outgoing connection for presence messages. This is now the same policy for Direct and Mix peers. An incoming stream runs the protocol's read loop; it is not automatically adopted as the peer's outgoing connection.
+
+When the recipient sends presence, `NetworkPeer.send` asks `connect` for the sending connection:
 
 ```nim
-proc readLoop*(
-    self: NetworkPeer, conn: Connection, useForSending: bool = false
-) {.async: (raises: []).}
+proc connect*(
+    self: NetworkPeer
+): Future[Connection] {.async: (raises: [CancelledError]).} =
+  if self.connected:
+    trace "Already connected", peer = self.id, connId = self.sendConn.oid
+    return self.sendConn
+
+  self.sendConn = await self.getConn()
+  self.trackedFutures.track(self.readLoop(self.sendConn))
+  return self.sendConn
 ```
 
-When `useForSending` is true and the peer has no usable outgoing connection, `readLoop` retains `conn` as the connection used by `NetworkPeer.send`. The read loop continues reading that same bidirectional stream. A presence response therefore travels back through the established Mix stream instead of attempting a new connection to the pseudonym. Block responses already use the stream on which their request arrived.
+The Mix adapter installs `getConn` in `BlockExcNetwork.getOrCreatePeer`. That callback calls `mixTransport.dial(peer, Codec)`. For a session recipient, `peer` is the anonymous session ID. MixTransport finds the existing session and opens a new stream within it; the recipient does not discover the initiator's real address or establish a replacement session.
 
-The Mix network adapter also remembers which peer IDs were introduced by recipient-side session events. If such a peer has no usable stream, the outgoing connection provider returns no connection; it does not attempt to dial the pseudonym. A later incoming stream can become the reply connection. Closing the retained stream clears the connection reference, and closing the session removes the recipient identity from the adapter.
+The requester must have the BlockExchange protocol mounted, because this new stream invokes its protocol handler. The resulting stream is retained as `sendConn`, so subsequent presence messages reuse it rather than paying another opening handshake each time. If that stream closes while the session remains healthy, the next send can open a replacement without waiting for a new incoming stream.
 
-Direct incoming streams retain their previous behavior. Each BlockExchange message or block response is submitted as one connection write; MixTransport serializes those writes before fragmenting them, so concurrently produced responses do not interleave their bytes.
+This replaces the earlier incoming-stream reuse workaround. That workaround was needed before MixTransport supported recipient-originated opening. There is no longer a separate recipient-ID set that prevents dialing. Mix session events still govern peer membership, and Direct/Mix peer state remains separate.
+
+Block responses continue to use the stream carrying their request. Each BlockExchange message or block response is submitted as one connection write; MixTransport serializes writes before fragmenting them.
+
+The dependency providing recipient-side opening is MixTransport commit `edd2423`. The transport walkthrough, **Mix Transport Implementation Walk Through - Recipient-Originated Streams**, explains its direction-specific handshake and shared duplicate-opening history.
 
 ## Using provider addresses
 
