@@ -79,6 +79,7 @@ type
     mixPeers*: PeerContextStore
     mixPeerTracker: PeerInFlightTracker
     peerSelectionPolicies: array[DownloadTransport, PresencePeerSelectionPolicy]
+    presenceQueryPolicies: array[DownloadTransport, PresenceQueryPolicy]
     trackedFutures: TrackedFutures # Tracks futures of blockexc tasks
     blockexcRunning: bool # Indicates if the blockexc task is running
     downloadManager*: DownloadManager
@@ -471,8 +472,13 @@ proc broadcastWantHave(
   if network.isNil:
     return
   for peerCtx in peers:
-    if not download.addPeerIfAbsent(peerCtx.id, BlockAvailability.unknown()):
-      # skip presence request for peer with Complete availability
+    if not download.addPeerIfAbsent(
+      peerCtx.id,
+      BlockAvailability.unknown(),
+      self.presenceQueryPolicies[download.ctx.transport],
+    ):
+      # Skip presence request for peer with Complete availability, or when
+      # QueryAdmittedPeers is selected and swarm admission failed.
       continue
 
     try:
@@ -1284,6 +1290,9 @@ proc new*(
       newPresencePeerSelectionPolicy(),
     mixPeerSelectionPolicy: PresencePeerSelectionPolicy =
       newPresencePeerSelectionPolicy(),
+    directPresenceQueryPolicy: PresenceQueryPolicy =
+      PresenceQueryPolicy.QuerySelectedPeers,
+    mixPresenceQueryPolicy: PresenceQueryPolicy = PresenceQueryPolicy.QuerySelectedPeers,
 ): BlockExcEngine =
   doAssert not directPeerSelectionPolicy.isNil
   doAssert not mixPeerSelectionPolicy.isNil
@@ -1293,6 +1302,7 @@ proc new*(
     mixPeers: PeerContextStore.new(),
     mixPeerTracker: PeerInFlightTracker.new(),
     peerSelectionPolicies: [directPeerSelectionPolicy, mixPeerSelectionPolicy],
+    presenceQueryPolicies: [directPresenceQueryPolicy, mixPresenceQueryPolicy],
     downloadManager: downloadManager,
     networks: networks,
     trackedFutures: TrackedFutures(),

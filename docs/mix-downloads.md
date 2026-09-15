@@ -732,6 +732,8 @@ proc new*(
       newPresencePeerSelectionPolicy(),
     mixPeerSelectionPolicy: PresencePeerSelectionPolicy =
       newPresencePeerSelectionPolicy(),
+    directPresenceQueryPolicy: PresenceQueryPolicy = PresenceQueryPolicy.QuerySelectedPeers,
+    mixPresenceQueryPolicy: PresenceQueryPolicy = PresenceQueryPolicy.QuerySelectedPeers,
 ): BlockExcEngine
 ```
 
@@ -849,21 +851,49 @@ Only peers present in the selected engine peer store enter a download's recorded
 
 ### Swarm admission after selection
 
-Selecting a candidate is not the same as admitting that peer into the swarm. Before sending a presence request, the caller uses `ActiveDownload.addPeerIfAbsent` in `engine/activedownload.nim`:
+After selecting candidates, `broadcastWantHave` attempts to add each candidate to the download's swarm before sending the presence query. Admission can fail because the swarm is full or because that swarm has banned the peer. Failure to admit a peer does not necessarily mean that asking about the peer's content is undesirable: admission and querying are separate decisions.
+
+The engine constructor accepts `directPresenceQueryPolicy` and `mixPresenceQueryPolicy` independently of the candidate-selection policies. Both default to `PresenceQueryPolicy.QuerySelectedPeers`: attempt admission, but still query a new candidate if admission fails. An experiment can pass `mixPresenceQueryPolicy = PresenceQueryPolicy.QueryAdmittedPeers` to suppress those queries for Mix without changing Direct. This does not change swarm capacity or override bans.
+
+`broadcastWantHave` in `engine/engine.nim` chooses the query policy for the download's transport. The excerpt below shows the decision before sending; the message fields and timeout handling are omitted:
+
+```nim
+proc broadcastWantHave(
+    self: BlockExcEngine,
+    download: ActiveDownload,
+    start: uint64,
+    count: uint64,
+    peers: seq[PeerContext],
+) {.async: (raises: [CancelledError]).} =
+  # Resolve the range address and selected protocol instance.
+  for peerCtx in peers:
+    if not download.addPeerIfAbsent(
+      peerCtx.id, BlockAvailability.unknown(),
+      self.presenceQueryPolicies[download.ctx.transport],
+    ):
+      continue
+    # Send the WantHave message through the selected protocol instance.
+```
+
+The helper in `engine/activedownload.nim` performs the admission attempt. Its Boolean result means whether to send the query, not whether admission succeeded:
 
 ```nim
 proc addPeerIfAbsent*(
-    download: ActiveDownload, peerId: PeerId, availability: BlockAvailability
+    download: ActiveDownload,
+    peerId: PeerId,
+    availability: BlockAvailability,
+    queryPolicy: PresenceQueryPolicy = PresenceQueryPolicy.QuerySelectedPeers,
 ): bool =
   let existingPeer = download.ctx.swarm.getPeer(peerId)
   if existingPeer.isSome:
     # peer already tracked, skip if bakComplete
     return existingPeer.get().availability.kind != bakComplete
 
-  return download.ctx.swarm.addPeer(peerId, availability)
+  let admitted = download.ctx.swarm.addPeer(peerId, availability)
+  return queryPolicy == PresenceQueryPolicy.QuerySelectedPeers or admitted
 ```
 
-For a new peer, the returned Boolean is the swarm's admission result. If the swarm is full or refuses a previously removed peer, the caller does not send a presence request as though admission succeeded. For a peer already present, the helper allows further work unless availability is already complete.
+For an existing peer, both policies query again unless availability is already complete. For a new peer, both policies attempt admission exactly once. `QuerySelectedPeers` then permits the query regardless of the admission result; `QueryAdmittedPeers` permits it only when admission succeeds. Sending a query does not itself insert a rejected peer into the swarm. A subsequent response goes through the normal availability-update path described next.
 
 ### Applying presence to the matching downloads
 
