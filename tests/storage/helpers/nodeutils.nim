@@ -197,7 +197,7 @@ proc generateNodes*(
       networkStore = NetworkStore.new(engine, localStore)
       manifestProto = ManifestProtocol.new(switch, localStore, blockDiscovery)
 
-    switch.mount(discovery.networks.protocol)
+    switch.mount(discovery.networks.dispatchProtocol)
     switch.mount(manifestProto)
 
     let node =

@@ -546,7 +546,7 @@ proc new*(
       taskPool = taskPool,
     )
 
-  switch.mount(networks.protocol)
+  switch.mount(networks.dispatchProtocol)
   switch.mount(manifestProto)
   switch.mount(discovery.kad)
 

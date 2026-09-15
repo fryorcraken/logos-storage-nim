@@ -94,7 +94,7 @@ type
     direct*: BlockExcNetwork
     mix*: BlockExcNetwork
     ## Mount this entry point, not the individual instances, when using the holder.
-    protocol*: LPProtocol
+    dispatchProtocol*: LPProtocol
 
 proc peerId*(b: BlockExcNetwork): PeerId =
   ## Return peer id
@@ -498,7 +498,7 @@ proc newBlockExcNetworks*(direct: BlockExcNetwork): BlockExcNetworks =
     await network.handleConnection(conn)
 
   # Both transports use this one mounted codec and its incoming-stream quota.
-  self.protocol = lp_protocol.new(
+  self.dispatchProtocol = lp_protocol.new(
     LPProtocol, @[Codec], dispatch, maxIncomingStreamsTotal = direct.maxInflight
   )
   self

@@ -233,7 +233,7 @@ asyncchecksuite "Network - MixTransport peer events":
       networks = newBlockExcNetworks(directNetwork)
       network = BlockExcNetwork.new(switch1, mixTransport = MixTransport())
     networks.mix = network
-    switch1.mount(networks.protocol)
+    switch1.mount(networks.dispatchProtocol)
     await switch1.start()
     await switch2.start()
 
@@ -248,7 +248,7 @@ asyncchecksuite "Network - MixTransport peer events":
       networks = newBlockExcNetworks(directNetwork)
       peer = switch2.peerInfo.peerId
       stream = newTransportStream(peer, peer, 1, Codec, StreamDirection.Inbound)
-    await networks.protocol.handler(stream, Codec)
+    await networks.dispatchProtocol.handler(stream, Codec)
     check stream.closed
     check peer notin directNetwork.peers
     await networks.stop()

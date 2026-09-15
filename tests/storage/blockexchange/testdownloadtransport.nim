@@ -143,7 +143,7 @@ asyncchecksuite "Download transport selection":
           return @[provider]
         engine.enableMixNetwork(transport)
         manifest.attachMixTransport(transport)
-        switches[index].mount(networks.protocol)
+        switches[index].mount(networks.dispatchProtocol)
         switches[index].mount(manifest)
         stores.add(store)
         engines.add(engine)

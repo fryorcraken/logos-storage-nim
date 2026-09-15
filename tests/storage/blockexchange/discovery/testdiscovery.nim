@@ -72,7 +72,7 @@ asyncchecksuite "Block Advertising and Discovery":
       localStore, discovery.networks, discovery, advertiser, peerStore, downloadManager
     )
 
-    switch.mount(discovery.networks.protocol)
+    switch.mount(discovery.networks.dispatchProtocol)
 
   test "Should discover want list":
     var handles: seq[Future[?!bt.Block]]
