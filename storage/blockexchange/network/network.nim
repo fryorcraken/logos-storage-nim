@@ -86,7 +86,6 @@ type
     trackedFutures*: TrackedFutures = TrackedFutures()
     mixTransport: MixTransport
     mixSessions: Table[PeerId, TransportSession]
-    transport: DownloadTransport
     switchPeerEventHandler: lp_connmanager.PeerEventHandler
     mixSessionEventHandler: SessionEventHandler
 
@@ -105,6 +104,10 @@ proc peerId*(b: BlockExcNetwork): PeerId =
 
 func sendConcurrencyLimit*(self: BlockExcNetwork): int =
   self.maxInflight
+
+func isMixDownload*(self: BlockExcNetwork): bool =
+  ## Whether this protocol instance handles downloads through MixTransport.
+  not self.mixTransport.isNil
 
 func networkFor*(
     self: BlockExcNetworks, transport: DownloadTransport
@@ -227,14 +230,13 @@ proc getOrCreatePeer(self: BlockExcNetwork, peer: PeerId): NetworkPeer =
   var getConn: ConnProvider = proc(): Future[Connection] {.
       async: (raises: [CancelledError])
   .} =
-    case self.transport
-    of DownloadTransport.Mix:
+    if self.isMixDownload:
       trace "Opening block exchange stream via MixTransport", peer
       let stream = (await self.mixTransport.dial(peer, Codec)).valueOr:
         trace "Unable to open MixTransport block exchange stream", peer, error
         return nil
       return stream
-    of DownloadTransport.Direct:
+    else:
       try:
         trace "Getting new connection stream", peer
         return await self.switch.dial(peer, Codec)
@@ -284,11 +286,11 @@ proc dialPeer*(self: BlockExcNetwork, peer: PeerRecord) {.async.} =
     trace "Skipping dialing self", peer = peer.peerId
     return
 
-  if peer.peerId in self.peers and self.transport == DownloadTransport.Direct:
+  if peer.peerId in self.peers and not self.isMixDownload:
     trace "Already connected to peer", peer = peer.peerId
     return
 
-  if self.transport == DownloadTransport.Mix:
+  if self.isMixDownload:
     let mixTransport = self.mixTransport
     trace "Connecting to peer via MixTransport", peer = peer.peerId
     let addresses = mixAddresses(peer.peerId, peer.addresses.mapIt(it.address))
@@ -309,7 +311,7 @@ proc dropPeer*(
 ) {.async: (raises: [CancelledError]).} =
   trace "Dropping peer", peer
 
-  if self.transport == DownloadTransport.Mix:
+  if self.isMixDownload:
     let session = self.mixSessions.getOrDefault(peer)
     if not session.isNil:
       await self.mixTransport.resetSession(session)
@@ -388,7 +390,7 @@ proc unsubscribeMixSessions(self: BlockExcNetwork) =
 proc handleConnection(
     self: BlockExcNetwork, conn: Connection
 ) {.async: (raises: [CancelledError]).} =
-  if (conn of TransportStream) != (self.transport == DownloadTransport.Mix):
+  if (conn of TransportStream) != self.isMixDownload:
     await conn.close()
     return
   let peer = self.getOrCreatePeer(conn.peerId)
@@ -408,7 +410,7 @@ method init*(self: BlockExcNetwork) {.raises: [].} =
     else:
       warn "Unknown peer event", event
 
-  if self.transport == DownloadTransport.Direct:
+  if not self.isMixDownload:
     self.switchPeerEventHandler = peerEventHandler
     self.switch.addPeerEventHandler(peerEventHandler, PeerEventKind.Joined)
     self.switch.addPeerEventHandler(peerEventHandler, PeerEventKind.Left)
@@ -452,8 +454,6 @@ proc new*(
 
   self.maxInflight = maxInflight
   self.mixTransport = mixTransport
-  self.transport =
-    if mixTransport.isNil: DownloadTransport.Direct else: DownloadTransport.Mix
 
   proc sendWantList(
       id: PeerId,
@@ -478,7 +478,7 @@ proc new*(
   self.request = BlockExcRequest(sendWantList: sendWantList, sendPresence: sendPresence)
 
   self.init()
-  if self.transport == DownloadTransport.Mix:
+  if self.isMixDownload:
     self.subscribeMixSessions()
   return self
 
@@ -486,7 +486,7 @@ func isMixEnabled*(self: BlockExcNetworks): bool =
   not self.mix.isNil
 
 proc newBlockExcNetworks*(direct: BlockExcNetwork): BlockExcNetworks =
-  doAssert direct.transport == DownloadTransport.Direct
+  doAssert not direct.isMixDownload
   let self = BlockExcNetworks(direct: direct)
   proc dispatch(
       conn: Connection, codec: string

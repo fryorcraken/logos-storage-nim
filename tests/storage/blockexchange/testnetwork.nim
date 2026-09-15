@@ -190,6 +190,15 @@ asyncchecksuite "Network - MixTransport peer events":
   teardown:
     await allFuturesThrowing(switch1.stop(), switch2.stop())
 
+  test "Protocol mode follows the supplied MixTransport":
+    let
+      directNetwork = BlockExcNetwork.new(switch1)
+      mixNetwork = BlockExcNetwork.new(switch1, mixTransport = MixTransport())
+    check not directNetwork.isMixDownload
+    check mixNetwork.isMixDownload
+    await directNetwork.stop()
+    await mixNetwork.stop()
+
   test "Direct and Mix peer entries and departures are independent":
     let
       network = BlockExcNetwork.new(switch1)
