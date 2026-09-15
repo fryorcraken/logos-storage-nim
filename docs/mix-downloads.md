@@ -712,11 +712,130 @@ proc discoveryTaskLoop(b: DiscoveryEngine) {.async: (raises: []).}
 
 For each queued key, the loop calls `b.discovery.find(key.cid)`. Once provider records arrive, the loop chooses `b.networks.networkFor(key.transport)` for their `dialPeer` calls and waits for those attempts to finish. The underlying discovery call does not receive `key.transport`: direct versus private DHT queries remain governed by discovery's own configuration.
 
-After dialing the returned providers, the discovery engine calls `onProviders`. The engine constructor registers the following discovery callback. Its parameters identify the discovered CID, the requested transport, and the returned provider records:
+### Selecting peers for presence queries
+
+The engine uses a `PresencePeerSelectionPolicy` to choose which connected peers to ask about content availability. The policy receives the peer store already selected for the download's transport. The policy does not choose a transport, dial a connection, or change the swarm's admission rules.
+
+`BlockExcEngine.new` accepts one policy for Direct and one for Mix. Both default to the original selection procedure. These parameters are separate from `selectionPolicy`, which controls block scheduling rather than peer selection:
+
 ```nim
+proc new*(
+    T: type BlockExcEngine,
+    localStore: BlockStore,
+    networks: BlockExcNetworks,
+    discovery: DiscoveryEngine,
+    advertiser: Advertiser,
+    peerStore: PeerContextStore,
+    downloadManager: DownloadManager,
+    selectionPolicy = spSequential,
+    directPeerSelectionPolicy: PresencePeerSelectionPolicy =
+      newPresencePeerSelectionPolicy(),
+    mixPeerSelectionPolicy: PresencePeerSelectionPolicy =
+      newPresencePeerSelectionPolicy(),
+): BlockExcEngine
+```
+
+Normal Storage construction omits both peer-policy arguments. An experiment can supply `mixPeerSelectionPolicy = newProviderPriorityPolicy()` without changing the Direct policy. The arguments are constructor configuration, not additional REST query parameters.
+
+The default implementation is in `engine/peerselection.nim`. Its initial-query operation collects all peers in the supplied store. Only an oversized list is shuffled and truncated:
+
+```nim
+method selectInitialPresencePeers*(
+    policy: PresencePeerSelectionPolicy,
+    peers: PeerContextStore,
+    providers: HashSet[PeerId],
+    limit: int,
+): seq[PeerContext] {.base, gcsafe, raises: [].} =
+  result = peers.toSeq()
+  if result.len > limit:
+    shuffle(result)
+    result.setLen(limit)
+```
+
+The `providers` argument contains discovered provider identities when the configured policy requests that information. The default policy ignores that argument: a connected peer need not already be listed as a provider before BlockExchange asks whether the peer has content. With a Mix peer store, this includes peers reachable through established Mix sessions. Their content availability is still determined by presence responses.
+
+The later-query operation deliberately has no initial-selection limit and performs no shuffle:
+
+```nim
+method selectPresencePeers*(
+    policy: PresencePeerSelectionPolicy,
+    peers: PeerContextStore,
+    providers: HashSet[PeerId],
+): seq[PeerContext] {.base, gcsafe, raises: [].} =
+  peers.toSeq()
+```
+
+These are two distinct operations because the initial and later broadcasts have different selection behavior. Both return candidates; the engine retains responsibility for sending the queries.
+
+### Where the worker invokes the policy
+
+`downloadWorker` selects the policy once from the engine's transport-indexed policy array. The following excerpt shows the initial call and the later call in the batch loop; other scheduling operations are omitted:
+
+```nim
+proc downloadWorker(
+    self: BlockExcEngine, download: ActiveDownload
+) {.async: (raises: []).} =
+  let
+    peers = self.peersFor(download.ctx.transport)
+    peerSelection = self.peerSelectionPolicies[download.ctx.transport]
+  # Other worker state and logging omitted.
+  try:
+    let maxSwarmPeers = download.ctx.swarm.config.deltaMax
+    let connectedPeers = peerSelection.selectInitialPresencePeers(
+      peers, download.ctx.providerPeers, maxSwarmPeers
+    )
+    # Initial broadcast or discovery follows.
+    # Inside the batch loop, when another presence broadcast is needed:
+    if shouldBroadcast:
+      let connectedPeers = peerSelection.selectPresencePeers(
+        peers, download.ctx.providerPeers
+      )
+      # Broadcast or discovery/retry follows.
+  # Exception handling omitted.
+```
+
+This keeps the download procedure shared. A policy changes the candidate list, while the existing worker controls when queries are needed and how their responses are used.
+
+### Optional provider prioritization
+
+`ProviderPriorityPolicy` derives from `PresencePeerSelectionPolicy` and overrides the selection operations. Its constructor is:
+
+```nim
+proc newProviderPriorityPolicy*(providersOnly = false): ProviderPriorityPolicy =
+  ProviderPriorityPolicy(providersOnly: providersOnly)
+```
+
+With the default `providersOnly = false`, the policy puts discovered providers first and then appends other peers in store order. Passing `providersOnly = true` explicitly excludes those other peers. Neither setting is selected automatically for Mix.
+
+The initial operation truncates the prioritized list without shuffling it, preserving provider priority. The later operation returns the entire eligible list. Prioritization and provider-only eligibility therefore remain available for experiments without modifying the default policy.
+
+### Provider information is tracked only when needed
+
+The policy also declares whether it needs discovery results:
+
+```nim
+method needsProviderTracking*(
+    policy: PresencePeerSelectionPolicy
+): bool {.base, gcsafe, raises: [].} =
+  false
+
+method needsProviderTracking*(
+    policy: ProviderPriorityPolicy
+): bool {.gcsafe, raises: [].} =
+  true
+```
+
+After dialing discovered providers, discovery invokes `onProviders` only if a callback is installed. The engine constructor installs that callback only when at least one configured policy needs provider tracking. With both default policies, no callback is installed: discovery does not scan active downloads or populate their provider sets.
+
+When a callback is needed, it first checks the policy for the transport that requested discovery. For example, enabling provider priority for Mix does not make Direct discovery populate provider sets. The callback then updates matching downloads:
+
+```nim
+# Nested callback installed by BlockExcEngine.new when tracking is needed.
 discovery.onProviders = proc(
     cid: Cid, transport: DownloadTransport, providers: seq[PeerRecord]
 ) {.gcsafe, raises: [].} =
+  if not self.peerSelectionPolicies[transport].needsProviderTracking:
+    return
   for downloads in self.downloadManager.downloads.values:
     for download in downloads.values:
       if download.manifestCid == cid and download.ctx.transport == transport:
@@ -726,26 +845,9 @@ discovery.onProviders = proc(
             download.ctx.providerPeers.incl(provider.peerId)
 ```
 
-The callback updates only downloads with the matching manifest CID and transport. A returned record becomes a candidate only if its peer is present in the selected engine peer store. The worker's `candidatePeers` operation uses this recorded set.
+Only peers present in the selected engine peer store enter a download's recorded provider set. The provider policy uses that set to order or restrict candidates; the default policy does not depend on the set.
 
-The worker obtains its initial candidates through this procedure in `engine/engine.nim`:
-
-```nim
-  # Known providers are considered first. Other direct peers remain fallback
-  # probes; Mix downloads only probe providers discovered for their manifest.
-  let peers = self.peersFor(download.ctx.transport)
-  for peer in peers:
-    if peer.id in download.ctx.providerPeers:
-      result.add(peer)
-  if download.ctx.transport == DownloadTransport.Direct:
-    for peer in peers:
-      if peer.id notin download.ctx.providerPeers:
-        result.add(peer)
-```
-
-The first loop admits only connected peers recorded as providers for this download. The second loop is conditional on Direct mode; it appends other Direct peers as fallback candidates.
-
-A Mix download probes only these content-specific providers. A Direct download retains the existing fallback of probing other direct peers when considering candidates, after known providers. This preserves existing direct transfers between connected nodes while preventing unrelated Mix sessions from becoming a Mix download's initial swarm.
+### Swarm admission after selection
 
 Selecting a candidate is not the same as admitting that peer into the swarm. Before sending a presence request, the caller uses `ActiveDownload.addPeerIfAbsent` in `engine/activedownload.nim`:
 

@@ -66,6 +66,21 @@ asyncchecksuite "NetworkStore engine handlers":
     peerCtx = PeerContext(id: peerId)
     engine.peers.add(peerCtx)
 
+  test "Default peer selection does not install provider tracking":
+    check discovery.onProviders.isNil
+
+  test "Provider tracking is installed only when a policy needs it":
+    discard BlockExcEngine.new(
+      localStore,
+      discovery.networks,
+      discovery,
+      advertiser,
+      peerStore,
+      downloadManager,
+      mixPeerSelectionPolicy = newProviderPriorityPolicy(),
+    )
+    check not discovery.onProviders.isNil
+
   test "Should handle want list":
     let
       tree = StorageMerkleTree.init(blocks.mapIt(it.cid)).tryGet

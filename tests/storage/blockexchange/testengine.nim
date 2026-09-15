@@ -4,5 +4,6 @@ import ./engine/testadvertiser
 import ./engine/testscheduler
 import ./engine/testswarm
 import ./engine/testpeertracker
+import ./engine/testpeerselection
 
 {.warning[UnusedImport]: off.}

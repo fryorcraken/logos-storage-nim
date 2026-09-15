@@ -1,8 +1,10 @@
 # Mix Transport integration: validation and open questions
 
-Updated: 2026-09-15. This is a live status note, separate from the implementation walkthrough.
+Updated: 2026-09-16. This is a live status note, separate from the implementation walkthrough.
 
 ## Recorded verification
+
+2026-09-16: the injected presence-peer selection policies passed 125 engine tests (including six focused policy tests) and three download-selection tests with real Mix traffic. The focused tests compare the default initial selection and random-number consumption with master's shuffle-and-truncate procedure. Both transports default to that policy; provider priority and provider-only eligibility are explicit constructor opt-ins. Default construction installs no provider-tracking callback. These checks do not establish benchmark equivalence or resolve the remaining Direct-path differences, including swarm-admission gating.
 
 2026-09-15: the independent Direct/Mix protocol-instance refactoring passed 9 network tests, 117 engine tests, 7 discovery tests, and 3 download-selection tests with real Mix traffic (136 tests total). Storage's compile-only check passed. The new network test confirms that the mounted dispatcher closes an incoming Mix stream when Mix is disabled without creating a Direct peer. The full Storage suite was not run.
 

@@ -7,7 +7,7 @@
 ## This file may not be copied, modified, or distributed except according to
 ## those terms.
 
-import std/[sequtils, sets, options, algorithm, sugar, tables, random]
+import std/[sequtils, sets, options, algorithm, sugar, tables]
 
 import pkg/chronos
 import pkg/libp2p/[cid, switch, multihash, multicodec]
@@ -39,8 +39,9 @@ import ./downloadmanager
 import ./peertracker
 import ./swarm
 import ./scheduler
+import ./peerselection
 
-export peers, downloadmanager, discovery, swarm, scheduler
+export peers, downloadmanager, discovery, swarm, scheduler, peerselection
 
 logScope:
   topics = "storage blockexcengine"
@@ -77,6 +78,7 @@ type
     peers*: PeerContextStore # Peers we're currently actively exchanging with
     mixPeers*: PeerContextStore
     mixPeerTracker: PeerInFlightTracker
+    peerSelectionPolicies: array[DownloadTransport, PresencePeerSelectionPolicy]
     trackedFutures: TrackedFutures # Tracks futures of blockexc tasks
     blockexcRunning: bool # Indicates if the blockexc task is running
     downloadManager*: DownloadManager
@@ -105,18 +107,6 @@ func trackerFor(
     self.mixPeerTracker
   else:
     self.downloadManager.peerTracker
-
-proc candidatePeers(self: BlockExcEngine, download: ActiveDownload): seq[PeerContext] =
-  # Known providers are considered first. Other direct peers remain fallback
-  # probes; Mix downloads only probe providers discovered for their manifest.
-  let peers = self.peersFor(download.ctx.transport)
-  for peer in peers:
-    if peer.id in download.ctx.providerPeers:
-      result.add(peer)
-  if download.ctx.transport == DownloadTransport.Direct:
-    for peer in peers:
-      if peer.id notin download.ctx.providerPeers:
-        result.add(peer)
 
 proc waitForComplete*[T](
     h: DownloadHandleGeneric[T]
@@ -515,6 +505,7 @@ proc downloadWorker(
     peers = self.peersFor(download.ctx.transport)
     network = self.networks.networkFor(download.ctx.transport)
     peerTracker = self.trackerFor(download.ctx.transport)
+    peerSelection = self.peerSelectionPolicies[download.ctx.transport]
   logScope:
     treeCid = treeCid
 
@@ -523,9 +514,9 @@ proc downloadWorker(
       (windowStart, windowCount) = download.ctx.currentPresenceWindow()
       maxSwarmPeers = download.ctx.swarm.config.deltaMax
 
-    var connectedPeers = self.candidatePeers(download)
-    if connectedPeers.len > maxSwarmPeers:
-      connectedPeers.setLen(maxSwarmPeers)
+    let connectedPeers = peerSelection.selectInitialPresencePeers(
+      peers, download.ctx.providerPeers, maxSwarmPeers
+    )
 
     if connectedPeers.len > 0:
       trace "Initial presence window broadcast",
@@ -667,7 +658,8 @@ proc downloadWorker(
         shouldBroadcast = true
 
       if shouldBroadcast:
-        let connectedPeers = self.candidatePeers(download)
+        let connectedPeers =
+          peerSelection.selectPresencePeers(peers, download.ctx.providerPeers)
 
         if connectedPeers.len > 0:
           trace "Broadcasting want-have for batch range",
@@ -1288,12 +1280,19 @@ proc new*(
     peerStore: PeerContextStore,
     downloadManager: DownloadManager,
     selectionPolicy = spSequential,
+    directPeerSelectionPolicy: PresencePeerSelectionPolicy =
+      newPresencePeerSelectionPolicy(),
+    mixPeerSelectionPolicy: PresencePeerSelectionPolicy =
+      newPresencePeerSelectionPolicy(),
 ): BlockExcEngine =
+  doAssert not directPeerSelectionPolicy.isNil
+  doAssert not mixPeerSelectionPolicy.isNil
   let self = BlockExcEngine(
     localStore: localStore,
     peers: peerStore,
     mixPeers: PeerContextStore.new(),
     mixPeerTracker: PeerInFlightTracker.new(),
+    peerSelectionPolicies: [directPeerSelectionPolicy, mixPeerSelectionPolicy],
     downloadManager: downloadManager,
     networks: networks,
     trackedFutures: TrackedFutures(),
@@ -1306,15 +1305,19 @@ proc new*(
   if not networks.mix.isNil:
     self.configureNetwork(networks.mix, DownloadTransport.Mix)
 
-  discovery.onProviders = proc(
-      cid: Cid, transport: DownloadTransport, providers: seq[PeerRecord]
-  ) {.gcsafe, raises: [].} =
-    for downloads in self.downloadManager.downloads.values:
-      for download in downloads.values:
-        if download.manifestCid == cid and download.ctx.transport == transport:
-          download.ctx.providerPeers.clear()
-          for provider in providers:
-            if provider.peerId in self.peersFor(transport):
-              download.ctx.providerPeers.incl(provider.peerId)
+  if directPeerSelectionPolicy.needsProviderTracking or
+      mixPeerSelectionPolicy.needsProviderTracking:
+    discovery.onProviders = proc(
+        cid: Cid, transport: DownloadTransport, providers: seq[PeerRecord]
+    ) {.gcsafe, raises: [].} =
+      if not self.peerSelectionPolicies[transport].needsProviderTracking:
+        return
+      for downloads in self.downloadManager.downloads.values:
+        for download in downloads.values:
+          if download.manifestCid == cid and download.ctx.transport == transport:
+            download.ctx.providerPeers.clear()
+            for provider in providers:
+              if provider.peerId in self.peersFor(transport):
+                download.ctx.providerPeers.incl(provider.peerId)
 
   return self
