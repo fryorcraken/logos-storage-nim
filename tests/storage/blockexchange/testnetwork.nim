@@ -218,7 +218,7 @@ asyncchecksuite "Network - MixTransport peer events":
     await network.stop()
 
   test "Physical Mix relay connections do not become BlockExchange peers":
-    let network = BlockExcNetwork.new(switch1, useMixSessionEvents = true)
+    let network = BlockExcNetwork.new(switch1, transport = DownloadTransport.Mix)
     switch1.mount(network)
     await switch1.start()
     await switch2.start()

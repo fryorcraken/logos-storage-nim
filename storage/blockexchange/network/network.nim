@@ -87,7 +87,7 @@ type
     mixTransport*: MixTransport
     mixNetwork*: BlockExcNetwork
     mixSessions: Table[PeerId, TransportSession]
-    useMixSessionEvents: bool
+    transport: DownloadTransport
     switchPeerEventHandler: lp_connmanager.PeerEventHandler
     mixSessionEventHandler: SessionEventHandler
 
@@ -214,22 +214,23 @@ proc getOrCreatePeer(self: BlockExcNetwork, peer: PeerId): NetworkPeer =
   var getConn: ConnProvider = proc(): Future[Connection] {.
       async: (raises: [CancelledError])
   .} =
-    if self.useMixSessionEvents and self.mixTransport.isNil:
-      return nil
-    if not self.mixTransport.isNil:
+    case self.transport
+    of DownloadTransport.Mix:
+      if self.mixTransport.isNil:
+        return nil
       trace "Opening block exchange stream via MixTransport", peer
       let stream = (await self.mixTransport.dial(peer, Codec)).valueOr:
         trace "Unable to open MixTransport block exchange stream", peer, error
         return nil
       return stream
-
-    try:
-      trace "Getting new connection stream", peer
-      return await self.switch.dial(peer, Codec)
-    except CancelledError as error:
-      raise error
-    except CatchableError as exc:
-      trace "Unable to connect to blockexc peer", exc = exc.msg
+    of DownloadTransport.Direct:
+      try:
+        trace "Getting new connection stream", peer
+        return await self.switch.dial(peer, Codec)
+      except CancelledError as error:
+        raise error
+      except CatchableError as exc:
+        trace "Unable to connect to blockexc peer", exc = exc.msg
 
   if not isNil(self.getConn):
     getConn = self.getConn
@@ -268,18 +269,18 @@ proc dialPeer*(self: BlockExcNetwork, peer: PeerRecord) {.async.} =
   ## Dial a peer
   ##
 
-  if self.useMixSessionEvents and self.mixTransport.isNil:
+  if self.transport == DownloadTransport.Mix and self.mixTransport.isNil:
     raise newException(StorageError, "Mix transport is not enabled")
 
   if self.isSelf(peer.peerId):
     trace "Skipping dialing self", peer = peer.peerId
     return
 
-  if peer.peerId in self.peers and not self.useMixSessionEvents:
+  if peer.peerId in self.peers and self.transport == DownloadTransport.Direct:
     trace "Already connected to peer", peer = peer.peerId
     return
 
-  if not self.mixTransport.isNil:
+  if self.transport == DownloadTransport.Mix:
     let mixTransport = self.mixTransport
     trace "Connecting to peer via MixTransport", peer = peer.peerId
     let addresses = mixAddresses(peer.peerId, peer.addresses.mapIt(it.address))
@@ -300,9 +301,9 @@ proc dropPeer*(
 ) {.async: (raises: [CancelledError]).} =
   trace "Dropping peer", peer
 
-  if not self.mixTransport.isNil:
+  if self.transport == DownloadTransport.Mix:
     let session = self.mixSessions.getOrDefault(peer)
-    if not session.isNil:
+    if not session.isNil and not self.mixTransport.isNil:
       await self.mixTransport.resetSession(session)
       return
 
@@ -358,7 +359,7 @@ proc handlePeerDeparted*(
 proc attachMixTransport*(self: BlockExcNetwork, mixTransport: MixTransport) =
   ## Use MixTransport sessions, rather than physical Switch connections, as
   ## the peer lifecycle observed by BlockExchange.
-  if not self.useMixSessionEvents:
+  if self.transport == DownloadTransport.Direct:
     self.mixNetwork.attachMixTransport(mixTransport)
     return
   doAssert self.mixTransport.isNil, "MixTransport is already attached"
@@ -400,7 +401,7 @@ method init*(self: BlockExcNetwork) {.raises: [].} =
       warn "Unknown peer event", event
 
   self.switchPeerEventHandler = peerEventHandler
-  if not self.useMixSessionEvents:
+  if self.transport == DownloadTransport.Direct:
     self.switch.addPeerEventHandler(peerEventHandler, PeerEventKind.Joined)
     self.switch.addPeerEventHandler(peerEventHandler, PeerEventKind.Left)
 
@@ -427,7 +428,7 @@ proc new*(
     switch: Switch,
     connProvider: ConnProvider = nil,
     maxInflight = DefaultMaxInflight,
-    useMixSessionEvents = false,
+    transport = DownloadTransport.Direct,
 ): BlockExcNetwork =
   ## Create a new BlockExcNetwork instance
   ##
@@ -449,10 +450,11 @@ proc new*(
     discard self.inflightSema.tryAcquire()
 
   self.maxInflight = maxInflight
-  self.useMixSessionEvents = useMixSessionEvents
-  if not useMixSessionEvents:
-    self.mixNetwork =
-      BlockExcNetwork.new(switch, maxInflight = maxInflight, useMixSessionEvents = true)
+  self.transport = transport
+  if transport == DownloadTransport.Direct:
+    self.mixNetwork = BlockExcNetwork.new(
+      switch, maxInflight = maxInflight, transport = DownloadTransport.Mix
+    )
 
   proc sendWantList(
       id: PeerId,
