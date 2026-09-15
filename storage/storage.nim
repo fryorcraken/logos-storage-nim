@@ -131,10 +131,10 @@ proc startMixTransport*(
     return
 
   let mixTransport = newMixTransport(mixProto)
-  s.storageNode.engine.network.attachMixTransport(mixTransport)
+  s.storageNode.engine.enableMixNetwork(mixTransport)
   s.storageNode.manifestProtocol.attachMixTransport(mixTransport)
   (await mixTransport.start()).isOkOr:
-    s.storageNode.engine.network.detachMixTransport()
+    await s.storageNode.engine.disableMixNetwork()
     s.storageNode.manifestProtocol.detachMixTransport()
     raise newException(StorageError, "Failed to start MixTransport: " & error)
   s.mixTransport = mixTransport
@@ -201,7 +201,7 @@ proc start*(self: StorageServer) {.async.} =
         raise
           newException(StorageError, "Failed to enable private queries: " & error.msg)
 
-    self.storageNode.engine.network.excludeRelays(relayPool.keys.toSeq)
+    self.storageNode.engine.networks.direct.excludeRelays(relayPool.keys.toSeq)
 
     await self.startMixTransport(mixProto)
 
@@ -278,7 +278,7 @@ proc stop*(s: StorageServer) {.async.} =
     try:
       await s.mixTransport.stop()
     finally:
-      s.storageNode.engine.network.detachMixTransport()
+      await s.storageNode.engine.disableMixNetwork()
       s.storageNode.manifestProtocol.detachMixTransport()
       s.mixTransport = nil
 
@@ -483,7 +483,8 @@ proc new*(
       isServer = config.nat.hasExtIp or config.autonatServer,
     )
 
-    network = BlockExcNetwork.new(switch)
+    directNetwork = BlockExcNetwork.new(switch)
+    networks = newBlockExcNetworks(directNetwork)
 
     repoData =
       case config.repoKind
@@ -529,9 +530,9 @@ proc new*(
       peerInfo = switch.peerInfo,
       advertiseContent = config.advertiseContent,
     )
-    blockDiscovery = DiscoveryEngine.new(repoStore, peerStore, network, discovery)
+    blockDiscovery = DiscoveryEngine.new(repoStore, peerStore, networks, discovery)
     engine = BlockExcEngine.new(
-      repoStore, network, blockDiscovery, advertiser, peerStore, downloadManager
+      repoStore, networks, blockDiscovery, advertiser, peerStore, downloadManager
     )
     store = NetworkStore.new(engine, repoStore)
     manifestProto = ManifestProtocol.new(switch, repoStore, discovery)
@@ -545,7 +546,7 @@ proc new*(
       taskPool = taskPool,
     )
 
-  switch.mount(network)
+  switch.mount(networks.protocol)
   switch.mount(manifestProto)
   switch.mount(discovery.kad)
 

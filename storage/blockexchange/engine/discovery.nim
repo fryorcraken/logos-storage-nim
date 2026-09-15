@@ -39,7 +39,7 @@ type DiscoveryKey = tuple[cid: Cid, transport: DownloadTransport]
 type DiscoveryEngine* = ref object of RootObj
   localStore*: BlockStore # Local block store for this instance
   peers*: PeerContextStore # Peer context store
-  network*: BlockExcNetwork # Network interface
+  networks*: BlockExcNetworks # Protocol instances available for provider dialing
   discovery*: Discovery # Discovery interface
   discEngineRunning*: bool # Indicates if discovery is running
   concurrentDiscReqs: int # Concurrent discovery requests
@@ -76,9 +76,12 @@ proc discoveryTaskLoop(b: DiscoveryEngine) {.async: (raises: []).} =
 
       if (await request.withTimeout(DefaultDiscoveryTimeout)) and
           peers =? (await request).catch:
-        let dialed = await allFinished(
-          peers.mapIt(b.network.networkFor(key.transport).dialPeer(it))
-        )
+        let network = b.networks.networkFor(key.transport)
+        if network.isNil:
+          trace "Skipping providers because selected transport is unavailable",
+            transport = key.transport
+          continue
+        let dialed = await allFinished(peers.mapIt(network.dialPeer(it)))
         if not b.onProviders.isNil:
           b.onProviders(cid, key.transport, peers)
 
@@ -169,7 +172,7 @@ proc new*(
     T: type DiscoveryEngine,
     localStore: BlockStore,
     peers: PeerContextStore,
-    network: BlockExcNetwork,
+    networks: BlockExcNetworks,
     discovery: Discovery,
     concurrentDiscReqs = DefaultConcurrentDiscRequests,
 ): DiscoveryEngine =
@@ -178,7 +181,7 @@ proc new*(
   DiscoveryEngine(
     localStore: localStore,
     peers: peers,
-    network: network,
+    networks: networks,
     discovery: discovery,
     concurrentDiscReqs: concurrentDiscReqs,
     discoveryQueue: newAsyncQueue[DiscoveryKey](concurrentDiscReqs),

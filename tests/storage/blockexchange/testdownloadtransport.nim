@@ -124,13 +124,14 @@ asyncchecksuite "Download transport selection":
           store = CacheStore.new()
           discovery = MockDiscovery.new()
           network = BlockExcNetwork.new(switches[index])
+          networks = newBlockExcNetworks(network)
           peers = PeerContextStore.new()
           manager = DownloadManager.new()
-          discoveryEngine = DiscoveryEngine.new(store, peers, network, discovery)
+          discoveryEngine = DiscoveryEngine.new(store, peers, networks, discovery)
           advertiser =
             Advertiser.new(store, discovery, peerInfo = switches[index].peerInfo)
           engine = BlockExcEngine.new(
-            store, network, discoveryEngine, advertiser, peers, manager
+            store, networks, discoveryEngine, advertiser, peers, manager
           )
           manifest = ManifestProtocol.new(
             switches[index], store, discovery, retries = 1, fetchTimeout = 15.seconds
@@ -140,9 +141,9 @@ asyncchecksuite "Download transport selection":
             d: MockDiscovery, cid: Cid
         ): Future[seq[PeerRecord]] {.async: (raises: [CancelledError]).} =
           return @[provider]
-        network.attachMixTransport(transport)
+        engine.enableMixNetwork(transport)
         manifest.attachMixTransport(transport)
-        switches[index].mount(network)
+        switches[index].mount(networks.protocol)
         switches[index].mount(manifest)
         stores.add(store)
         engines.add(engine)
@@ -216,8 +217,8 @@ asyncchecksuite "Download transport selection":
 
       let
         peer = provider.peerId
-        directNetwork = engines[0].network
-        mixNetwork = directNetwork.networkFor(DownloadTransport.Mix)
+        directNetwork = engines[0].networks.direct
+        mixNetwork = engines[0].networks.mix
       check peer in directNetwork.peers
       check peer in mixNetwork.peers
       check directNetwork.peers[peer] != mixNetwork.peers[peer]
@@ -227,7 +228,7 @@ asyncchecksuite "Download transport selection":
         engines[0].peersFor(DownloadTransport.Mix).get(peer)
       await verifyRecipientPresenceLifecycle(
         mixNetwork,
-        engines[1].network.networkFor(DownloadTransport.Mix),
+        engines[1].networks.mix,
         peer,
         BlockAddress(treeCid: dataset.manifest.treeCid, index: 0),
       )

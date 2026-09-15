@@ -84,12 +84,18 @@ type
     inflightSema: AsyncSemaphore
     maxInflight: int = DefaultMaxInflight
     trackedFutures*: TrackedFutures = TrackedFutures()
-    mixTransport*: MixTransport
-    mixNetwork*: BlockExcNetwork
+    mixTransport: MixTransport
     mixSessions: Table[PeerId, TransportSession]
     transport: DownloadTransport
     switchPeerEventHandler: lp_connmanager.PeerEventHandler
     mixSessionEventHandler: SessionEventHandler
+
+  BlockExcNetworks* = ref object
+    ## Independent protocol instances. Mix is absent until enabled at startup.
+    direct*: BlockExcNetwork
+    mix*: BlockExcNetwork
+    ## Mount this entry point, not the individual instances, when using the holder.
+    protocol*: LPProtocol
 
 proc peerId*(b: BlockExcNetwork): PeerId =
   ## Return peer id
@@ -97,8 +103,15 @@ proc peerId*(b: BlockExcNetwork): PeerId =
 
   return b.switch.peerInfo.peerId
 
-func networkFor*(self: BlockExcNetwork, transport: DownloadTransport): BlockExcNetwork =
-  if transport == DownloadTransport.Mix: self.mixNetwork else: self
+func sendConcurrencyLimit*(self: BlockExcNetwork): int =
+  self.maxInflight
+
+func networkFor*(
+    self: BlockExcNetworks, transport: DownloadTransport
+): BlockExcNetwork =
+  case transport
+  of DownloadTransport.Direct: self.direct
+  of DownloadTransport.Mix: self.mix
 
 proc isSelf*(b: BlockExcNetwork, peer: PeerId): bool =
   ## Check if peer is self
@@ -216,8 +229,6 @@ proc getOrCreatePeer(self: BlockExcNetwork, peer: PeerId): NetworkPeer =
   .} =
     case self.transport
     of DownloadTransport.Mix:
-      if self.mixTransport.isNil:
-        return nil
       trace "Opening block exchange stream via MixTransport", peer
       let stream = (await self.mixTransport.dial(peer, Codec)).valueOr:
         trace "Unable to open MixTransport block exchange stream", peer, error
@@ -269,9 +280,6 @@ proc dialPeer*(self: BlockExcNetwork, peer: PeerRecord) {.async.} =
   ## Dial a peer
   ##
 
-  if self.transport == DownloadTransport.Mix and self.mixTransport.isNil:
-    raise newException(StorageError, "Mix transport is not enabled")
-
   if self.isSelf(peer.peerId):
     trace "Skipping dialing self", peer = peer.peerId
     return
@@ -303,11 +311,11 @@ proc dropPeer*(
 
   if self.transport == DownloadTransport.Mix:
     let session = self.mixSessions.getOrDefault(peer)
-    if not session.isNil and not self.mixTransport.isNil:
+    if not session.isNil:
       await self.mixTransport.resetSession(session)
       return
 
-    # This adapter retains session objects obtained through provider dialing,
+    # This protocol instance retains session objects obtained through provider dialing,
     # but not recipient sessions introduced by session events.
     warn "Removing MixTransport peer without resetting its recipient session", peer
     await self.unregisterPeer(peer)
@@ -356,14 +364,9 @@ proc handlePeerDeparted*(
     return
   await self.unregisterPeer(peer)
 
-proc attachMixTransport*(self: BlockExcNetwork, mixTransport: MixTransport) =
+proc subscribeMixSessions(self: BlockExcNetwork) =
   ## Use MixTransport sessions, rather than physical Switch connections, as
   ## the peer lifecycle observed by BlockExchange.
-  if self.transport == DownloadTransport.Direct:
-    self.mixNetwork.attachMixTransport(mixTransport)
-    return
-  doAssert self.mixTransport.isNil, "MixTransport is already attached"
-
   proc sessionEventHandler(
       event: SessionEvent
   ): Future[void] {.async: (raises: [CancelledError]).} =
@@ -373,18 +376,23 @@ proc attachMixTransport*(self: BlockExcNetwork, mixTransport: MixTransport) =
     of SessionEventKind.Closed:
       await self.unregisterPeer(event.peerId)
 
-  self.mixTransport = mixTransport
   self.mixSessionEventHandler = sessionEventHandler
-  mixTransport.addSessionEventHandler(sessionEventHandler)
+  self.mixTransport.addSessionEventHandler(sessionEventHandler)
 
-proc detachMixTransport*(self: BlockExcNetwork) =
-  if not self.mixNetwork.isNil:
-    self.mixNetwork.detachMixTransport()
+proc unsubscribeMixSessions(self: BlockExcNetwork) =
   if not self.mixTransport.isNil and not self.mixSessionEventHandler.isNil:
     self.mixTransport.removeSessionEventHandler(self.mixSessionEventHandler)
   self.mixSessionEventHandler = nil
   self.mixSessions.clear()
-  self.mixTransport = nil
+
+proc handleConnection(
+    self: BlockExcNetwork, conn: Connection
+) {.async: (raises: [CancelledError]).} =
+  if (conn of TransportStream) != (self.transport == DownloadTransport.Mix):
+    await conn.close()
+    return
+  let peer = self.getOrCreatePeer(conn.peerId)
+  await peer.readLoop(conn)
 
 method init*(self: BlockExcNetwork) {.raises: [].} =
   ## Perform protocol initialization
@@ -400,27 +408,20 @@ method init*(self: BlockExcNetwork) {.raises: [].} =
     else:
       warn "Unknown peer event", event
 
-  self.switchPeerEventHandler = peerEventHandler
   if self.transport == DownloadTransport.Direct:
+    self.switchPeerEventHandler = peerEventHandler
     self.switch.addPeerEventHandler(peerEventHandler, PeerEventKind.Joined)
     self.switch.addPeerEventHandler(peerEventHandler, PeerEventKind.Left)
 
   proc handler(
       conn: Connection, proto: string
-  ): Future[void] {.async: (raises: [CancelledError]).} =
-    let peerId = conn.peerId
-    if conn of TransportStream and not self.mixNetwork.isNil:
-      let peer = self.mixNetwork.getOrCreatePeer(peerId)
-      await peer.readLoop(conn)
-      return
-    let blockexcPeer = self.getOrCreatePeer(peerId)
-    await blockexcPeer.readLoop(conn)
+  ): Future[void] {.async: (raw: true, raises: [CancelledError]).} =
+    self.handleConnection(conn)
 
   self.handler = handler
 
 proc stop*(self: BlockExcNetwork) {.async: (raises: []).} =
-  if not self.mixNetwork.isNil:
-    await self.mixNetwork.stop()
+  self.unsubscribeMixSessions()
   await self.trackedFutures.cancelTracked()
 
 proc new*(
@@ -428,7 +429,7 @@ proc new*(
     switch: Switch,
     connProvider: ConnProvider = nil,
     maxInflight = DefaultMaxInflight,
-    transport = DownloadTransport.Direct,
+    mixTransport: MixTransport = nil,
 ): BlockExcNetwork =
   ## Create a new BlockExcNetwork instance
   ##
@@ -450,11 +451,9 @@ proc new*(
     discard self.inflightSema.tryAcquire()
 
   self.maxInflight = maxInflight
-  self.transport = transport
-  if transport == DownloadTransport.Direct:
-    self.mixNetwork = BlockExcNetwork.new(
-      switch, maxInflight = maxInflight, transport = DownloadTransport.Mix
-    )
+  self.mixTransport = mixTransport
+  self.transport =
+    if mixTransport.isNil: DownloadTransport.Direct else: DownloadTransport.Mix
 
   proc sendWantList(
       id: PeerId,
@@ -479,9 +478,32 @@ proc new*(
   self.request = BlockExcRequest(sendWantList: sendWantList, sendPresence: sendPresence)
 
   self.init()
+  if self.transport == DownloadTransport.Mix:
+    self.subscribeMixSessions()
   return self
 
-proc isMixEnabled*(self: BlockExcNetwork): bool =
-  return
-    not self.mixTransport.isNil or
-    (not self.mixNetwork.isNil and not self.mixNetwork.mixTransport.isNil)
+func isMixEnabled*(self: BlockExcNetworks): bool =
+  not self.mix.isNil
+
+proc newBlockExcNetworks*(direct: BlockExcNetwork): BlockExcNetworks =
+  doAssert direct.transport == DownloadTransport.Direct
+  let self = BlockExcNetworks(direct: direct)
+  proc dispatch(
+      conn: Connection, codec: string
+  ): Future[void] {.async: (raises: [CancelledError]).} =
+    let network = if conn of TransportStream: self.mix else: self.direct
+    if network.isNil:
+      await conn.close()
+      return
+    await network.handleConnection(conn)
+
+  # Both transports use this one mounted codec and its incoming-stream quota.
+  self.protocol = lp_protocol.new(
+    LPProtocol, @[Codec], dispatch, maxIncomingStreamsTotal = direct.maxInflight
+  )
+  self
+
+proc stop*(self: BlockExcNetworks) {.async: (raises: []).} =
+  if not self.mix.isNil:
+    await self.mix.stop()
+  await self.direct.stop()
