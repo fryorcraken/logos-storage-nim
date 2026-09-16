@@ -945,7 +945,7 @@ The same handler can share the resulting availability with other downloads of th
 
 ## Streaming reads and shared local content
 
-The streaming REST endpoint passes the transport choice through `StorageNodeRef.retrieve` to `streamEntireDataset`. The latter creates a download and returns a `StoreStream` that reads blocks as they become available. Each missing-block read must wait on that particular download, because multiple downloads of the same tree can be running with different transport choices.
+The streaming REST endpoint passes the transport choice through `StorageNodeRef.retrieve` to `streamEntireDataset`. The latter creates a download and returns a `StoreStream` that reads blocks as they become available. Each missing-block read waits on that particular download. This matters both for simultaneous Direct/Mix downloads and for two Direct downloads of the same tree: another download's cancellation must not cancel this reader's pending block handle.
 
 The beginning of `streamEntireDataset` in `storage/node.nim` creates the download and a store view tied to its ID:
 
@@ -1011,5 +1011,17 @@ The first branch selects the download by both ID and tree CID. The unscoped bran
 The local store is checked before waiting. A missing block causes a wait on the selected handle; another local-store error cancels that handle and returns the error. If no matching download remains, the operation only checks local content—it does not select a different download to replace the scoped one.
 
 The scoped view therefore follows its own download's scheduler and cancellation state. Callers that omit `downloadId` use the tree-CID lookup shown in the other branch.
+
+### Concurrent downloads and shared storage
+
+Starting a foreground streaming download creates a new `ActiveDownload` with its own ID, scheduler, and pending handles; it does not reuse another foreground download simply because the tree CID matches. Background downloads have a different entry point: `StorageNodeRef.startBackgroundDownload` first calls `getBackgroundDownload(treeCid, transport)` and returns an existing background download's ID when one matches. A background request does not thereby reuse an arbitrary foreground download. Direct and Mix background requests do not reuse each other's operations.
+
+The download-specific `NetworkStore` is a wrapper around the same local store, not a private cache. A block already present locally can satisfy either reader, regardless of which transport supplied it. The binding selects which download's future to await when the block is missing; it does not enforce the provenance of cached bytes.
+
+Each download worker checks local storage before requesting its next batch. This can avoid fetching blocks another download has already stored, but does not coalesce requests already in flight. Two downloads can therefore receive and validate the same block. The batch-processing path stores the block by CID and then stores its proof and block-CID mapping under `(treeCid, index)`. The transport choice is not part of either storage key.
+
+`RepoStore.storeBlock` reports `AlreadyInStore` for an existing block with matching size and retains the later expiry. `putLeafMetadata` retains existing metadata for the same tree position. `RepoStore.putBlock` updates storage accounting only for a newly stored block, and `putCidAndProof` increments the block reference count only for newly stored leaf metadata. These operations use the datastore's concurrency-aware `modifyGet` operation. Duplicate successful deliveries therefore reuse stored content; they can still incur network, validation, and metadata work.
+
+Completing one download's block handle does not broadcast completion to every download of the same tree. Another worker can discover the stored block through its local checks. A reader already waiting on its own handle remains tied to that download's progress and cancellation. Coalescing downloads would require explicit ownership and cancellation rules; sharing the local store alone does not implement it.
 
 Both transports still share the local content-addressed store. A verified block already available locally can satisfy either download without another network request. The selected transport governs network connections; it does not partition cached content by the route through which the content arrived.

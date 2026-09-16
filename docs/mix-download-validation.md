@@ -4,6 +4,8 @@ Updated: 2026-09-16. This is a live status note, separate from the implementatio
 
 ## Recorded verification
 
+2026-09-16: retaining download-ID-bound streaming readers passed all 59 download-manager tests, including two new Direct/Direct cancellation-isolation tests and the existing Direct/Mix handle-isolation test. Reader binding is an accepted shared correctness change relative to master's tree-only lookup. No production code changed in this increment. Concurrent storage behavior was inspected in source, not fault-injection tested; no benchmark equivalence is claimed.
+
 2026-09-16: restoring master-style Direct address forwarding passed 12 network tests, three Direct/Mix integration tests, and Storage's compile-only check. The integration provider list places a valid Mix advertisement before its ordinary endpoint. The unused Direct filtering helper and both empty-list rejections were removed; Mix validation is unchanged. This does not validate mapper ordering or final advertisement preservation; those remain separate follow-ups. Benchmarks and the full suite were not run.
 
 2026-09-16: removing explicit Direct provider registration passed 12 network tests and three Direct/Mix download-selection integration tests. The two new network tests use real Switch connections to verify a single registration notification and preservation of relay exclusion. Direct address filtering and Mix session registration were not changed. The full suite and benchmarks were not run.

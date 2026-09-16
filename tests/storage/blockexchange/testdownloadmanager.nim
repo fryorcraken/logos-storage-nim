@@ -24,6 +24,53 @@ const
   Threshold = 0.75
 
 suite "DownloadManager - Want Handles":
+  test "A Direct reader survives cancellation of another Direct download of the same tree":
+    let
+      manager = DownloadManager.new()
+      md = testManifestDesc(Cid.example, DefaultBlockSize.uint32, 1)
+      firstDownload = manager.startDownload(DownloadDesc(md: md, count: 1))
+      readerDownload = manager.startDownload(DownloadDesc(md: md, count: 1))
+      address = BlockAddress.init(md.manifest.treeCid, 0)
+      blk = bt.Block.new("independent Direct reader".toBytes).tryGet()
+      view = NetworkStore.new(
+        BlockExcEngine(downloadManager: manager),
+        CacheStore.new(),
+        downloadId = some(readerDownload.id),
+      )
+    check firstDownload.id != readerDownload.id
+    let reading = view.getBlock(address)
+    check address in readerDownload
+    manager.cancelDownload(firstDownload)
+    check not reading.finished
+    discard readerDownload.completeWantHandle(address, some(blk))
+    check (await reading).tryGet() == blk
+    manager.cancelDownload(readerDownload)
+
+  test "Cancelling a Direct reader's own download does not attach it to another download":
+    let
+      manager = DownloadManager.new()
+      md = testManifestDesc(Cid.example, DefaultBlockSize.uint32, 1)
+      otherDownload = manager.startDownload(DownloadDesc(md: md, count: 1))
+      readerDownload = manager.startDownload(DownloadDesc(md: md, count: 1))
+      address = BlockAddress.init(md.manifest.treeCid, 0)
+      view = NetworkStore.new(
+        BlockExcEngine(downloadManager: manager),
+        CacheStore.new(),
+        downloadId = some(readerDownload.id),
+      )
+    let reading = view.getBlock(address)
+    check address in readerDownload
+    manager.cancelDownload(readerDownload)
+    var cancelled = false
+    try:
+      discard await reading
+    except CancelledError:
+      cancelled = true
+    check cancelled
+    check not otherDownload.cancelled
+    check address notin otherDownload
+    manager.cancelDownload(otherDownload)
+
   test "A scoped streaming read waits for its own download":
     let
       manager = DownloadManager.new()
