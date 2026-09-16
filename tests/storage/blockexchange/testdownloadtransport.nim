@@ -72,7 +72,8 @@ asyncchecksuite "Download transport selection":
     check mixAddresses(infos[0].peerId, @[address]).len == 1
     check mixAddresses(infos[1].peerId, @[address]).len == 0
     check mixAddresses(infos[0].peerId, @[infos[0].multiAddr]).len == 0
-    check directAddresses(@[address, infos[0].multiAddr]) == @[infos[0].multiAddr]
+    check not TCP.match(address)
+    check not QUIC_V1.match(address)
 
   test "Manifest and blocks use the selected transport to the same provider":
     let previousWriter = defaultChroniclesStream.output.writer
@@ -117,7 +118,9 @@ asyncchecksuite "Download transport selection":
 
       let provider = PeerRecord.init(
         switches[^1].peerInfo.peerId,
-        @[infos[^1].multiAddr, mixes[^1].localMixPubInfo.toMixAddress().tryGet()],
+        # Put the Mix advertisement first: Direct dialing must skip an
+        # unsupported candidate, not rely on the advertisement being last.
+        @[mixes[^1].localMixPubInfo.toMixAddress().tryGet(), infos[^1].multiAddr],
       )
       for index in [0, 4]:
         let

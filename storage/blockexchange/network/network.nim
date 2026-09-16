@@ -300,10 +300,7 @@ proc dialPeer*(self: BlockExcNetwork, peer: PeerRecord) {.async.} =
       raise newException(StorageError, "Failed to connect over MixTransport: " & error)
     self.mixSessions[peer.peerId] = session
   else:
-    let addresses = directAddresses(peer.addresses.mapIt(it.address))
-    if addresses.len == 0:
-      raise newException(StorageError, "Provider has no direct address")
-    await self.switch.connect(peer.peerId, addresses)
+    await self.switch.connect(peer.peerId, peer.addresses.mapIt(it.address))
 
 proc dropPeer*(
     self: BlockExcNetwork, peer: PeerId

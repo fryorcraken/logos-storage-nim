@@ -145,10 +145,9 @@ proc fetchManifestFromPeer(
           "Error opening MixTransport manifest stream to " & $peer.peerId & ": " & error
         )
     else:
-      let addresses = directAddresses(peer.addresses.mapIt(it.address))
-      if addresses.len == 0:
-        return failure("Provider has no direct address")
-      conn = await self.switch.dial(peer.peerId, addresses, ManifestProtocolCodec)
+      conn = await self.switch.dial(
+        peer.peerId, peer.addresses.mapIt(it.address), ManifestProtocolCodec
+      )
 
     let cidBytes = cid.data.buffer
     var reqBuf = newSeqUninit[byte](2 + cidBytes.len)

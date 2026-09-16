@@ -594,7 +594,7 @@ func mixAddresses*(
 
 The Mix connection path rejects a provider if no validated Mix address remains. Otherwise, BlockExchange calls the address-aware `MixTransport.connect`, and manifest fetching calls the address-aware `MixTransport.dial`. The explicit destination supplies the final Mix hop; it does not have to be added to the relay pool. Subsequent streams can reuse the established session through the peer-ID overload.
 
-The Direct path removes Mix advertisements before passing addresses to the Switch. A provider with no ordinary address is not dialed by that path. An advertisement is contact information, not a guarantee of reachability or support for the requested application protocol; connection and stream establishment still report those failures.
+The Direct path passes the complete provider address list to the Switch, leaving address support and connection reuse to libp2p. An advertisement is contact information, not a guarantee of reachability or support for the requested application protocol; connection and stream establishment still report those failures.
 
 ### Fetching the manifest through the selected connection
 
@@ -619,10 +619,9 @@ proc fetchManifestFromPeer(
           "Error opening MixTransport manifest stream to " & $peer.peerId & ": " & error
         )
     else:
-      let addresses = directAddresses(peer.addresses.mapIt(it.address))
-      if addresses.len == 0:
-        return failure("Provider has no direct address")
-      conn = await self.switch.dial(peer.peerId, addresses, ManifestProtocolCodec)
+      conn = await self.switch.dial(
+        peer.peerId, peer.addresses.mapIt(it.address), ManifestProtocolCodec
+      )
 
     let cidBytes = cid.data.buffer
     var reqBuf = newSeqUninit[byte](2 + cidBytes.len)
@@ -687,11 +686,10 @@ For Direct providers, the same procedure asks the Switch to establish a physical
 proc dialPeer*(self: BlockExcNetwork, peer: PeerRecord) {.async.} =
   # Earlier checks and Mix branch omitted.
   # Direct branch:
-  let addresses = directAddresses(peer.addresses.mapIt(it.address))
-  if addresses.len == 0:
-    raise newException(StorageError, "Provider has no direct address")
-  await self.switch.connect(peer.peerId, addresses)
+  await self.switch.connect(peer.peerId, peer.addresses.mapIt(it.address))
 ```
+
+Both Direct paths pass the provider's complete address list to libp2p in its original order. Libp2p can reuse an existing connection; when a new connection is needed, the dialer tries address candidates using transports that recognize them. TCP and QUIC require a full address-pattern match, and relay transport requires a terminal circuit-relay component, so a normal Mix advertisement is not an ordinary transport candidate. Direct dialing does not depend on the Mix advertisement being last. Connection reuse and failure handling remain libp2p's responsibility, including when the supplied list is empty.
 
 Direct peer registration comes from the Switch's `Joined` event, not from an additional registration call after `connect`. The event handler installed by `BlockExcNetwork.init` calls:
 
