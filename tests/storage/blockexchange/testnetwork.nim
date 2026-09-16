@@ -1,6 +1,7 @@
 import std/[sequtils, tables]
 
 import pkg/chronos
+import pkg/libp2p/connmanager
 
 import pkg/storage/rng
 import pkg/storage/chunker
@@ -179,6 +180,53 @@ asyncchecksuite "Network - Senders":
     )
 
     await done.wait(500.millis)
+
+asyncchecksuite "Network - Direct provider registration":
+  var
+    localSwitch, remoteSwitch: Switch
+    network: BlockExcNetwork
+    joined: Future[void]
+    registrations: int
+
+  setup:
+    localSwitch = newStandardSwitch()
+    remoteSwitch = newStandardSwitch()
+    network = BlockExcNetwork.new(localSwitch)
+    registrations = 0
+    joined = newFuture[void]()
+    network.handlers.onPeerJoined = proc(
+        peer: PeerId
+    ) {.async: (raises: [CancelledError]).} =
+      inc registrations
+    localSwitch.addPeerEventHandler(
+      proc(peer: PeerId, event: PeerEvent) {.async: (raises: [CancelledError]).} =
+        if not joined.finished:
+          joined.complete()
+      ,
+      PeerEventKind.Joined,
+    )
+    await localSwitch.start()
+    await remoteSwitch.start()
+
+  teardown:
+    await allFuturesThrowing(localSwitch.stop(), remoteSwitch.stop())
+    await network.stop()
+
+  test "Provider dialing registers through the Joined event only once":
+    let peer = remoteSwitch.peerInfo.peerId
+    await network.dialPeer(PeerRecord.init(peer, remoteSwitch.peerInfo.addrs))
+    await joined.wait(2.seconds)
+    check peer in network.peers
+    check registrations == 1
+
+  test "Provider dialing does not bypass relay exclusion":
+    let peer = remoteSwitch.peerInfo.peerId
+    network.excludeRelays([peer])
+    await network.dialPeer(PeerRecord.init(peer, remoteSwitch.peerInfo.addrs))
+    # Observe the real Switch event before checking that BlockExchange ignored it.
+    await joined.wait(2.seconds)
+    check peer notin network.peers
+    check registrations == 0
 
 asyncchecksuite "Network - MixTransport peer events":
   var switch1, switch2: Switch

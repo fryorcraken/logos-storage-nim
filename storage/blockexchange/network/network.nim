@@ -304,7 +304,6 @@ proc dialPeer*(self: BlockExcNetwork, peer: PeerRecord) {.async.} =
     if addresses.len == 0:
       raise newException(StorageError, "Provider has no direct address")
     await self.switch.connect(peer.peerId, addresses)
-    await self.registerPeer(peer.peerId)
 
 proc dropPeer*(
     self: BlockExcNetwork, peer: PeerId

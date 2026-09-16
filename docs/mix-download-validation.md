@@ -4,6 +4,8 @@ Updated: 2026-09-16. This is a live status note, separate from the implementatio
 
 ## Recorded verification
 
+2026-09-16: removing explicit Direct provider registration passed 12 network tests and three Direct/Mix download-selection integration tests. The two new network tests use real Switch connections to verify a single registration notification and preservation of relay exclusion. Direct address filtering and Mix session registration were not changed. The full suite and benchmarks were not run.
+
 2026-09-16: the independent presence-query policies passed 131 engine tests and three Direct/Mix download-selection integration tests. Six focused tests cover full swarms, swarm bans, successful admission, and existing incomplete/complete peers. Storage's compile-only check also passed. Both transports default to master's query-after-failed-admission behavior; `QueryAdmittedPeers` is an explicit opt-in. These results do not establish benchmark equivalence or validate every remaining Direct-path difference.
 
 2026-09-16: the injected presence-peer selection policies passed 125 engine tests (including six focused policy tests) and three download-selection tests with real Mix traffic. The focused tests compare the default initial selection and random-number consumption with master's shuffle-and-truncate procedure. Both transports default to that policy; provider priority and provider-only eligibility are explicit constructor opt-ins. Default construction installs no provider-tracking callback. These checks do not establish benchmark equivalence or resolve the remaining Direct-path differences, including swarm-admission gating.

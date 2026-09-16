@@ -681,6 +681,33 @@ if self.isMixDownload:
 
 This step obtains a session. A later BlockExchange send obtains an application stream through the connection provider described earlier. Keeping these steps separate lets discovery supply and validate the provider's addresses while subsequent sends reuse the established session.
 
+For Direct providers, the same procedure asks the Switch to establish a physical connection. This excerpt shows the Direct branch; the self/already-connected checks and Mix branch are omitted:
+
+```nim
+proc dialPeer*(self: BlockExcNetwork, peer: PeerRecord) {.async.} =
+  # Earlier checks and Mix branch omitted.
+  # Direct branch:
+  let addresses = directAddresses(peer.addresses.mapIt(it.address))
+  if addresses.len == 0:
+    raise newException(StorageError, "Provider has no direct address")
+  await self.switch.connect(peer.peerId, addresses)
+```
+
+Direct peer registration comes from the Switch's `Joined` event, not from an additional registration call after `connect`. The event handler installed by `BlockExcNetwork.init` calls:
+
+```nim
+proc handlePeerJoined*(
+    self: BlockExcNetwork, peer: PeerId
+) {.async: (raises: [CancelledError]).} =
+  if peer in self.excludedPeers:
+    return
+  await self.registerPeer(peer)
+```
+
+This check excludes configured relay identities from Direct BlockExchange registration. For an allowed peer, `registerPeer` creates or reuses the protocol's peer object and invokes `onPeerJoined`; the engine's callback creates a peer context if one does not already exist. An existing physical connection does not necessarily produce another `Joined` event when reused. Provider dialing therefore relies on the existing event-managed peer state rather than promising a new registration notification on every call.
+
+Mix uses its separate session-event callback for the corresponding registration. Establishing a physical connection to a Mix relay is not a Mix application-peer event.
+
 ## Discovery and swarm admission
 
 Discovery requests are keyed by `(CID, transport)`. Requests for the same CID over different transports can therefore both establish their intended connection type. This key controls provider dialing, not the DHT lookup mechanism itself.
