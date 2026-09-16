@@ -24,12 +24,52 @@ const
   Threshold = 0.75
 
 suite "DownloadManager - Want Handles":
+  test "Tree-only lookup lets cancelling an unrelated download cancel another download's read":
+    let
+      manager = DownloadManager.new()
+      md = testManifestDesc(Cid.example, DefaultBlockSize.uint32, 1)
+      firstDownload = manager.startDownload(DownloadDesc(md: md, count: 1))
+      secondDownload = manager.startDownload(DownloadDesc(md: md, count: 1))
+      # Table iteration order is not an ownership rule. Observe the selected
+      # entry instead of assuming the first-created download will be returned.
+      unrelatedDownload = manager.getDownload(md.manifest.treeCid).get()
+      readerDownload =
+        if unrelatedDownload.id == firstDownload.id: secondDownload else: firstDownload
+      address = BlockAddress.init(md.manifest.treeCid, 0)
+      # This read belongs to readerDownload, but master's shared store receives
+      # no downloadId and therefore selects unrelatedDownload instead.
+      view =
+        NetworkStore.new(BlockExcEngine(downloadManager: manager), CacheStore.new())
+    let reading = view.getBlock(address)
+    check address in unrelatedDownload
+    check address notin readerDownload
+    check not reading.finished
+    manager.cancelDownload(unrelatedDownload)
+    var cancelled = false
+    try:
+      discard await reading
+    except CancelledError:
+      cancelled = true
+    check cancelled
+    # The reader failed even though its own download is still active.
+    check not readerDownload.cancelled
+    check not readerDownload.completionFuture.finished
+    manager.cancelDownload(readerDownload)
+
   test "A Direct reader survives cancellation of another Direct download of the same tree":
     let
       manager = DownloadManager.new()
       md = testManifestDesc(Cid.example, DefaultBlockSize.uint32, 1)
       firstDownload = manager.startDownload(DownloadDesc(md: md, count: 1))
-      readerDownload = manager.startDownload(DownloadDesc(md: md, count: 1))
+      secondDownload = manager.startDownload(DownloadDesc(md: md, count: 1))
+      selectedByTreeLookup = manager.getDownload(md.manifest.treeCid).get()
+      # Bind to the other download so a regression to tree-only lookup fails
+      # this test regardless of table iteration order.
+      readerDownload =
+        if selectedByTreeLookup.id == firstDownload.id:
+          secondDownload
+        else:
+          firstDownload
       address = BlockAddress.init(md.manifest.treeCid, 0)
       blk = bt.Block.new("independent Direct reader".toBytes).tryGet()
       view = NetworkStore.new(
@@ -37,10 +77,10 @@ suite "DownloadManager - Want Handles":
         CacheStore.new(),
         downloadId = some(readerDownload.id),
       )
-    check firstDownload.id != readerDownload.id
+    check selectedByTreeLookup.id != readerDownload.id
     let reading = view.getBlock(address)
     check address in readerDownload
-    manager.cancelDownload(firstDownload)
+    manager.cancelDownload(selectedByTreeLookup)
     check not reading.finished
     discard readerDownload.completeWantHandle(address, some(blk))
     check (await reading).tryGet() == blk
