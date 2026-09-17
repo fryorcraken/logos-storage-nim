@@ -187,8 +187,6 @@ proc searchForNewPeers(self: BlockExcEngine, cid: Cid, transport: DownloadTransp
     storage_block_exchange_discovery_requests_total.inc()
     self.lastDiscRequest[transport] = Moment.now()
     self.discovery.queueFindBlocksReq(@[cid], transport)
-  else:
-    trace "Not searching for new peers, rate limit not expired", cid = cid
 
 proc banAndDropPeer(
     self: BlockExcEngine, download: ActiveDownload, peerId: PeerId
@@ -966,13 +964,16 @@ proc blockPresenceHandler*(
           let availability =
             case presence.presenceType
             of BlockPresenceType.Complete:
+              trace "peer has complete tree", peer = peer, treeCid = treeCid
               BlockAvailability.complete()
             of BlockPresenceType.HaveRange:
+              trace "peer has ranges", peer = peer, treeCid = treeCid, len = presence.ranges.len
               if presence.ranges.len > 0:
                 BlockAvailability.fromRanges(presence.ranges)
               else:
                 BlockAvailability.unknown()
             of BlockPresenceType.DontHave:
+              trace "peer doesn't have anything", peer = peer, treeCid = treeCid
               BlockAvailability.unknown()
 
           downloadOpt.get().updatePeerAvailability(peer, availability)
@@ -1209,6 +1210,8 @@ proc configureNetwork(
   ): Future[seq[BlockDelivery]] {.async: (raises: [CancelledError]).} =
     let maxIndex = high(Natural).uint64
     var totalCount: uint64 = 0
+
+    trace "Received WantBlocks request", peer = peer, treeCid = req.treeCid, ranges = req.ranges.len
     for r in req.ranges:
       if r.count == 0 or r.start > maxIndex or r.count - 1 > maxIndex - r.start or
           r.start > uint64.high - r.count or r.count > uint64.high - totalCount:
@@ -1228,6 +1231,7 @@ proc configureNetwork(
 
     for r in req.ranges:
       totalRequested += r.count
+      trace "Processing WantBlocks range", peer = peer, start = r.start, count = r.count
       for i in r.start ..< r.start + r.count:
         let address = BlockAddress(treeCid: req.treeCid, index: i)
 
