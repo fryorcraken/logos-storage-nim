@@ -288,6 +288,64 @@ else
 		echo -e $(BUILD_MSG) "build/$@.so" && \
 		$(ENV_SCRIPT) nim libstorageDynamic $(NIM_PARAMS) storage.nims
 endif
+
+####################
+## Android (fork) ##
+####################
+# Added in the fryorcraken/logos-storage-nim fork: cross-compiles libstorage.so
+# for Android, mirroring the liblogosdelivery-android-* pattern from
+# logos-messaging/logos-delivery's Makefile. Not present upstream.
+.PHONY: libstorage-android \
+		libstorage-android-precheck \
+		libstorage-android-arm64 \
+		libstorage-android-amd64 \
+		libstorage-android-x86 \
+		libstorage-android-arm
+
+ANDROID_TARGET ?= 30
+ifeq ($(detected_OS),macOS)
+	ANDROID_TOOLCHAIN_DIR := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/darwin-x86_64
+else
+	ANDROID_TOOLCHAIN_DIR := $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64
+endif
+
+libstorage-android-precheck:
+ifndef ANDROID_NDK_HOME
+	$(error ANDROID_NDK_HOME is not set)
+endif
+
+build-libstorage-for-android-arch:
+	mkdir -p $(CURDIR)/build/android/$(ABIDIR)/
+	CC=$(ANDROID_TOOLCHAIN_DIR)/bin/$(ANDROID_COMPILER) \
+	CPU=$(CPU) ABIDIR=$(ABIDIR) $(ENV_SCRIPT) nim libstorageAndroid $(NIM_PARAMS) storage.nims
+
+libstorage-android-arm64: CPU=arm64
+libstorage-android-arm64: ABIDIR=arm64-v8a
+libstorage-android-arm64: | libstorage-android-precheck build deps
+	$(MAKE) build-libstorage-for-android-arch CPU=$(CPU) ABIDIR=$(ABIDIR) \
+	  ANDROID_COMPILER=aarch64-linux-android$(ANDROID_TARGET)-clang
+
+libstorage-android-amd64: CPU=amd64
+libstorage-android-amd64: ABIDIR=x86_64
+libstorage-android-amd64: | libstorage-android-precheck build deps
+	$(MAKE) build-libstorage-for-android-arch CPU=$(CPU) ABIDIR=$(ABIDIR) \
+	  ANDROID_COMPILER=x86_64-linux-android$(ANDROID_TARGET)-clang
+
+libstorage-android-x86: CPU=i386
+libstorage-android-x86: ABIDIR=x86
+libstorage-android-x86: | libstorage-android-precheck build deps
+	$(MAKE) build-libstorage-for-android-arch CPU=$(CPU) ABIDIR=$(ABIDIR) \
+	  ANDROID_COMPILER=i686-linux-android$(ANDROID_TARGET)-clang
+
+libstorage-android-arm: CPU=arm
+libstorage-android-arm: ABIDIR=armeabi-v7a
+libstorage-android-arm: | libstorage-android-precheck build deps
+	$(MAKE) build-libstorage-for-android-arch CPU=$(CPU) ABIDIR=$(ABIDIR) \
+	  ANDROID_COMPILER=armv7a-linux-androideabi$(ANDROID_TARGET)-clang
+
+libstorage-android: libstorage-android-amd64 libstorage-android-arm64 \
+                     libstorage-android-x86 libstorage-android-arm
+
 endif # "variables.mk" was not includedMa
 ################
 ## Presets    ##
