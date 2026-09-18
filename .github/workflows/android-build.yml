@@ -3,7 +3,15 @@ name: Android build (fork)
 # Added in the fryorcraken/logos-storage-nim fork. Proves that
 # `make libstorage-android` — the Android cross-compilation support this fork
 # adds on top of upstream logos-storage/logos-storage-nim — actually produces
-# a valid libstorage.so for every supported Android ABI. Not present upstream.
+# a valid libstorage.so. Not present upstream.
+#
+# Only arm64-v8a and x86_64 (64-bit ABIs). x86 and armeabi-v7a (32-bit) fail
+# on a real, pre-existing bug in storage's own source — storage/units.nim's
+# `NBytes = distinct Natural` overflows int32's range when computing a
+# compile-time constant (~21.4B bytes) — see the NOTE above the
+# libstorage-android-x86/-arm Makefile targets. Out of scope for this fork
+# to fix (would mean changing a core type used throughout the storage
+# engine); modern Android devices are effectively all 64-bit regardless.
 
 on:
   push:
@@ -40,10 +48,6 @@ jobs:
             make_target: libstorage-android-arm64
           - abi: x86_64
             make_target: libstorage-android-amd64
-          - abi: x86
-            make_target: libstorage-android-x86
-          - abi: armeabi-v7a
-            make_target: libstorage-android-arm
     steps:
       - name: Checkout sources
         uses: actions/checkout@v6

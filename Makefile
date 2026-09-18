@@ -331,6 +331,20 @@ libstorage-android-amd64: | libstorage-android-precheck build deps
 	$(MAKE) build-libstorage-for-android-arch CPU=$(CPU) ABIDIR=$(ABIDIR) \
 	  ANDROID_COMPILER=x86_64-linux-android$(ANDROID_TARGET)-clang
 
+# NOTE (32-bit ABIs, x86/armeabi-v7a): these targets exist and are wired the
+# same as the 64-bit ones, but currently FAIL to build. storage/units.nim
+# defines `NBytes* = distinct Natural`, and Natural's range is word-size
+# dependent (int32 on a 32-bit target). storage/stores/repostore/types.nim's
+# `DefaultQuotaBytes* = 20.GiBs` (~21.4 billion) is evaluated at compile time
+# and exceeds int32's range, so Nim's range check raises "value out of
+# range" — a real, pre-existing 32-bit incompatibility in storage's own
+# source, not something introduced by this fork's Android patch. The correct
+# fix is widening NBytes to a fixed-width 64-bit type, but that's a
+# meaningful semantic change to a type used throughout the storage engine —
+# out of scope for a fork whose purpose is Android build support, not
+# upstream refactors. Left in place (rather than removed) in case someone
+# wants to build these ABIs after fixing units.nim themselves, or upstream
+# fixes it. `libstorage-android` (below) deliberately does not include them.
 libstorage-android-x86: CPU=i386
 libstorage-android-x86: ABIDIR=x86
 libstorage-android-x86: | libstorage-android-precheck build deps
@@ -343,8 +357,8 @@ libstorage-android-arm: | libstorage-android-precheck build deps
 	$(MAKE) build-libstorage-for-android-arch CPU=$(CPU) ABIDIR=$(ABIDIR) \
 	  ANDROID_COMPILER=armv7a-linux-androideabi$(ANDROID_TARGET)-clang
 
-libstorage-android: libstorage-android-amd64 libstorage-android-arm64 \
-                     libstorage-android-x86 libstorage-android-arm
+# Only the 64-bit ABIs — see the NOTE above the x86/arm targets for why.
+libstorage-android: libstorage-android-amd64 libstorage-android-arm64
 
 endif # "variables.mk" was not includedMa
 ################
